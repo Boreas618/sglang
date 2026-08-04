@@ -112,9 +112,13 @@ def resolve_runtime_config(
         )
     mask_token_id = int(draft_config.mask_token_id)
     if mask_token_id >= target_vocab_size:
-        raise ValueError(
-            f"DSpark mask_token_id={mask_token_id} is outside the target "
-            f"vocab size {target_vocab_size}."
+        # Inkling-Small convention: mask lives in a PADDED embedding slot
+        # (embed rows 201024 > logical vocab 200058); lookup is valid.
+        logger.warning(
+            "DSpark mask_token_id=%s exceeds target vocab size %s; allowing "
+            "(padded-embedding mask convention).",
+            mask_token_id,
+            target_vocab_size,
         )
 
     return DSparkRuntimeConfig(
