@@ -1,0 +1,31 @@
+{
+  "status": "qualified",
+  "warmup_count": 6,
+  "measured_count": 6,
+  "all_media_checks_passed": true,
+  "provider": "fastvideo-kernel-sm100a",
+  "transformer_forwards": 8,
+  "validation": {
+    "checks": {
+      "aac_stereo_32khz_audio": true,
+      "all_requests_succeeded": true,
+      "audio_spans_video": true,
+      "declared_request_count": true,
+      "decoded_video": true,
+      "fixed_video_geometry": true,
+      "h264_video": true,
+      "metric:video_latency_ms.p95": true,
+      "metric:videos_per_second": true,
+      "nonzero_audio_rms": true,
+      "nonzero_video_variance": true
+    },
+    "statistics": {
+      "completed_videos": 6,
+      "media_bytes": 23013161,
+      "request_count": 6,
+      "successful_requests": 6
+    },
+    "valid": true,
+    "warnings": []
+  }
+}

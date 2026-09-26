@@ -1,0 +1,11 @@
+{
+  "version": "0.3.4",
+  "build_cuda": "13.0",
+  "torch": "2.13.0+cu130",
+  "architecture": "10.0a",
+  "sdist_sha256": "e6c3fb2d4e9615d07ac81de3bc821e3c9224bc21e9d83be734e0cefcb379ef5c",
+  "libraries": {
+    "_C/fastvideo_kernel_ops.cpython-312-aarch64-linux-gnu.so": "bbdb129f92f1cff8c91728c4bb3205d458064730e9080e5610efe7e5b7566733"
+  },
+  "build_evidence": "baseline/vllm-omni/20260926T041709Z/kernel-rebuilt.json"
+}

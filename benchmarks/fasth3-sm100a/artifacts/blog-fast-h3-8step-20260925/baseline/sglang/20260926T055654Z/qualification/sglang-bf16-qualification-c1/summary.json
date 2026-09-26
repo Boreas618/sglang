@@ -1,0 +1,277 @@
+{
+  "base_url": "http://127.0.0.1:18083",
+  "benchmark": "sglang-bf16-qualification-c1",
+  "classifiers": {
+    "ok": 6
+  },
+  "client": {
+    "peak_rss_bytes": 132120576,
+    "retained_body_bytes": 45973072
+  },
+  "dataset": "jsonl",
+  "elapsed_s": 123.84773717913777,
+  "endpoint": "/v1/videos",
+  "failed_count": 0,
+  "gpu_memory": {
+    "interval_s": 0.5,
+    "mean_total_utilization_gpu_pct": 275.51816443594646,
+    "peak_per_gpu_mib": [
+      114885,
+      110503,
+      110503,
+      110501
+    ],
+    "peak_single_gpu_mib": 114885,
+    "peak_total_mib": 442114,
+    "peak_utilization_gpu_pct": [
+      100,
+      100,
+      100,
+      100
+    ],
+    "samples": 523
+  },
+  "launch": {
+    "command": [
+      "/workspace/sglang-0.5.17-env/bin/sglang",
+      "serve",
+      "--model-type",
+      "diffusion",
+      "--model-path",
+      "/workspace/models/FastVideo-FastH3-8-Step-V2",
+      "--num-gpus",
+      "4",
+      "--ulysses-degree",
+      "4",
+      "--performance-mode",
+      "speed",
+      "--encoder-parallel",
+      "auto",
+      "--attention-backend",
+      "fa",
+      "--attention-backend-config",
+      "{\"VSA_sparsity\": 0.8, \"vsa_tile_size\": 64}",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "18083",
+      "--served-model-name",
+      "FastH3",
+      "--output-path",
+      "/workspace/UniServe/artifacts/blog-fast-h3-8step-20260925/baseline/sglang/20260926T055654Z/server-media",
+      "--input-save-path",
+      "/workspace/UniServe/artifacts/blog-fast-h3-8step-20260925/baseline/sglang/20260926T055654Z/server-input",
+      "--component-attention-backends",
+      "transformer=VIDEO_SPARSE_ATTN_H3"
+    ],
+    "dirty": true,
+    "environment": {
+      "CUDA_VISIBLE_DEVICES": "0,1,2,3",
+      "EP_SUPPRESS_NCCL_CHECK": "1",
+      "FASTVIDEO_VSA_SM100A": "1",
+      "PYTHONPATH": "/workspace/UniServe/refs/sglang-current/python"
+    },
+    "git_head": "9458bca425a96d5bc45f5e97da9d2986449fad3e",
+    "gpu": {
+      "driver_version": "580.82.07",
+      "name": "NVIDIA GB200"
+    },
+    "working_directory": "/workspace/UniServe"
+  },
+  "metric_definitions": [
+    {
+      "direction": "higher",
+      "path": "videos_per_second"
+    },
+    {
+      "direction": "lower",
+      "path": "video_latency_ms.p95"
+    }
+  ],
+  "metrics": {
+    "completed": 6,
+    "completed_requests": 6,
+    "completed_videos": 6,
+    "concurrency": 0.9999941207693751,
+    "e2e_latency_ms": {
+      "count": 6,
+      "max": 35459.225601516664,
+      "mean": 20641.168174954753,
+      "min": 8404.789827764034,
+      "p50": 19861.05879629031,
+      "p90": 32162.581849377602,
+      "p95": 33810.90372544713,
+      "p99": 35129.561226302765,
+      "std": 9448.61753360718
+    },
+    "input_throughput": 266.45622077267046,
+    "itl_ms": {
+      "count": 0,
+      "max": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "p50": 0.0,
+      "p90": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "std": 0.0
+    },
+    "max_concurrent_requests": 0,
+    "max_itl_ms": null,
+    "max_output_tokens_per_s": 0.0,
+    "mean_e2e_latency_ms": 20641.168174954753,
+    "mean_itl_ms": null,
+    "mean_tpot_ms": null,
+    "mean_ttft_ms": null,
+    "media_bytes_per_second": 185818.1790331215,
+    "output_throughput": 0.0,
+    "request_throughput": 0.04844658559503099,
+    "token_timing_available": false,
+    "token_timing_request_count": 0,
+    "total_input_tokens": 33000,
+    "total_output_tokens": 0,
+    "total_throughput": 266.45622077267046,
+    "tpot_ms": {
+      "count": 0,
+      "max": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "p50": 0.0,
+      "p90": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "std": 0.0
+    },
+    "ttft_ms": {
+      "count": 0,
+      "max": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "p50": 0.0,
+      "p90": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "std": 0.0
+    },
+    "video_latency_ms": {
+      "count": 6,
+      "max": 35459.225601516664,
+      "mean": 20641.168174954753,
+      "min": 8404.789827764034,
+      "p50": 19861.05879629031,
+      "p90": 32162.581849377602,
+      "p95": 33810.90372544713,
+      "p99": 35129.561226302765,
+      "std": 9448.61753360718
+    },
+    "videos_per_second": 0.04844658559503099
+  },
+  "model": "FastH3",
+  "ok_count": 6,
+  "request_count": 6,
+  "selected_rows": {
+    "count": 6,
+    "sha256": "2e90a1c87d0d75e2bb0bd755f1ffa7a364b90bf61d157aa848c3bebdac3dce28"
+  },
+  "server_version": null,
+  "status": "completed",
+  "task": "video",
+  "validation": {
+    "checks": {
+      "aac_stereo_32khz_audio": true,
+      "all_requests_succeeded": true,
+      "audio_spans_video": true,
+      "declared_request_count": true,
+      "decoded_video": true,
+      "fixed_video_geometry": true,
+      "h264_video": true,
+      "metric:video_latency_ms.p95": true,
+      "metric:videos_per_second": true,
+      "nonzero_audio_rms": true,
+      "nonzero_video_variance": true
+    },
+    "statistics": {
+      "completed_videos": 6,
+      "media_bytes": 23013161,
+      "request_count": 6,
+      "successful_requests": 6
+    },
+    "valid": true,
+    "warnings": []
+  },
+  "warnings": [
+    "server_version_unavailable",
+    "dirty_workspace"
+  ],
+  "workload": {
+    "dataset": "jsonl",
+    "dataset_path": "/workspace/UniServe/artifacts/blog-fast-h3-8step-20260925/protocol/workload/manifests/qualification.jsonl",
+    "dataset_revision": null,
+    "endpoint": "/v1/videos",
+    "image": {
+      "cfg_interval": null,
+      "cfg_norm": null,
+      "guidance_scale": null,
+      "height": null,
+      "image_count": null,
+      "image_guidance_scale": null,
+      "steps": null,
+      "timestep_shift": null,
+      "width": null
+    },
+    "load": {
+      "max_concurrency": 1,
+      "num_prompts": 6,
+      "priming_manifest": null,
+      "request_rate": "inf",
+      "request_timeout_s": 21600,
+      "seed": 20260925,
+      "warmup_manifest": "/workspace/UniServe/artifacts/blog-fast-h3-8step-20260925/protocol/workload/manifests/warmup.jsonl",
+      "warmup_requests": 0
+    },
+    "metrics": [
+      {
+        "direction": "higher",
+        "path": "videos_per_second"
+      },
+      {
+        "direction": "lower",
+        "path": "video_latency_ms.p95"
+      }
+    ],
+    "model": "FastH3",
+    "name": "sglang-bf16-qualification-c1",
+    "provenance": {
+      "checkpoint_revision": "3da2ddfe1954d9cda4c05b643dc0f26007a655c5",
+      "hardware": "gb200-4",
+      "purpose": "six-shape eligibility; eight forwards, native SM100a, full AV decode",
+      "source_lock": "/workspace/UniServe/artifacts/blog-fast-h3-8step-20260925/baseline/sglang/20260926T055654Z/source-lock.json",
+      "system_revision": "8772916e06e631f3834fc7ba86f36d9c88a23082"
+    },
+    "question": null,
+    "sampling": {
+      "extra_body": {},
+      "frequency_penalty": null,
+      "ignore_eos": true,
+      "max_tokens": null,
+      "min_p": null,
+      "presence_penalty": null,
+      "repetition_penalty": null,
+      "sampling_seed": null,
+      "stream": false,
+      "temperature": 0.0,
+      "top_k": null,
+      "top_p": 1.0
+    },
+    "server": "sglang-bf16",
+    "task": "video",
+    "tokenizer": null,
+    "video": {
+      "backend": "sglang",
+      "media_dir": null,
+      "poll_interval_s": 0.1,
+      "prompt_tokens": 1000,
+      "seconds": 5.0
+    }
+  }
+}

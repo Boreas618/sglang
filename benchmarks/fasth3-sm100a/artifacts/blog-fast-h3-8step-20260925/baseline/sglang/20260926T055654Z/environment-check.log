@@ -1,0 +1,8 @@
+uv pip check --python /workspace/sglang-0.5.17-env/bin/python
+Using Python 3.12.3 environment at: /workspace/sglang-0.5.17-env
+Checked 254 packages in 7ms
+Found 1 incompatibility
+The package `nvidia-cusparselt-cu13` was built for a different platform
+file /workspace/sglang-0.5.17-env/lib/python3.12/site-packages/nvidia/cusparselt/lib/libcusparseLt.so.0
+/workspace/sglang-0.5.17-env/lib/python3.12/site-packages/nvidia/cusparselt/lib/libcusparseLt.so.0: ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV), dynamically linked, BuildID[sha1]=8b9e2a641eca0780f3de6f9140736fc609fe6485, stripped
+cuSPARSELt uses the NVIDIA manylinux2014_sbsa wheel tag; the installed ELF targets ARM aarch64.

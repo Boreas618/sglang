@@ -1,0 +1,19 @@
+{
+  "upstream_revision": "8772916e06e631f3834fc7ba86f36d9c88a23082",
+  "files": {
+    "python/pyproject.toml": "4109fdd782c803f592c9155d7a604ede07b05adf99ecb79988f51a0bc43c0217",
+    "python/sglang/multimodal_gen/configs/pipeline_configs/minimax_h3.py": "61bb85e403d836cb82f5ad812cf29a2594543bf5878bea248d3d11486469345c",
+    "python/sglang/multimodal_gen/configs/sample/minimax_h3.py": "2ac9946b65dacd568ab2aed46d026be60bf59f22bd22a750c364c5b16dee14b1",
+    "python/sglang/multimodal_gen/registry.py": "8673e5ae9e17a7dfd48f8fb064f306dfcef6381315abf7af8ce440bcafb2354d",
+    "python/sglang/multimodal_gen/runtime/layers/attention/backends/vsa_h3_kernels.py": "ebb5fd7f43abbdbcc6b27b29e267f3464e4499d2c8be1b77e82b4af8682d77e8",
+    "python/sglang/multimodal_gen/runtime/pipelines/minimax_h3_pipeline.py": "438a27c5b166bff74f95c1c9f2ba43597ff7405bd6428f57dd1ade1b8d3de497",
+    "python/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/release_metadata.py": "865d808046bca6bb5ec6a7d590af8f2b196364eb6211078a7c75006c9e0143cc",
+    "python/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/stages/timestep_preparation.py": "9e324c1881e08aefa3d53dfd2ab1e4460880eeeb81509dae56a2dfef5101f3c6",
+    "python/sglang/multimodal_gen/runtime/utils/model_overlay.py": "6d3da967a453147a69ed9a73e341236f032acce1dcd05fc0ddbd8c94f25f696c",
+    "python/sglang/multimodal_gen/model_overlays/fasth3_8_step/README.md": "d9bb29acd425b6687f7e0f5c7c278b98c7afa33986758182b8e56dc26e11fa6a",
+    "python/sglang/multimodal_gen/model_overlays/fasth3_8_step/_overlay/materialize.py": "cea47247c3d6349cbf9bb3e795ccc696e1313b0b633b0edb89982576aa8dcc71",
+    "python/sglang/multimodal_gen/model_overlays/fasth3_8_step/_overlay/overlay_manifest.json": "a9e84ccb290f2dca5ee4538a0186781c3f74fb3889f8307b4d617783a7e96586",
+    "python/sglang/multimodal_gen/model_overlays/fasth3_8_step/model_index.json": "fdbf366ab599e09941798703014b736492aae74bb57f03140d6dce1d402c52c0",
+    "python/sglang/multimodal_gen/test/unit/test_fasth3_eight_step.py": "7522c25fd5a16e8c7830fda3e20c6e227f942f131820e2ade2d1d60eb85ea257"
+  }
+}
