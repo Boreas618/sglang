@@ -175,6 +175,9 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
         self.add_stage(
             MiniMaxH3TimestepPreparationStage(
                 sigma_shift_scales=sigma_shift_scales,
+                denoising_sigmas=release_metadata.denoising_sigmas
+                if release_metadata
+                else None,
             )
         )
         self.add_stage(

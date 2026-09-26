@@ -355,11 +355,47 @@ class FastH3PipelineConfig(MiniMaxH3PipelineConfig):
         super().validate_server_args(server_args)
 
 
-__all__ = ["FastH3PipelineConfig", "MiniMaxH3PipelineConfig"]
+@dataclass
+class FastH3EightStepPipelineConfig(FastH3PipelineConfig):
+    """The released eight-step student's trained attention contract."""
+
+    def validate_server_args(self, server_args) -> None:
+        if server_args.attention_backend is None:
+            server_args.attention_backend = AttentionBackendEnum.FA
+        # H3 VSA implements only the DiT's packed multimodal attention. The
+        # Qwen text encoder and VAEs retain their own dense attention.
+        components = dict(server_args.component_attention_backends or {})
+        components.setdefault("transformer", "VIDEO_SPARSE_ATTN_H3")
+        server_args.component_attention_backends = components
+        config = dict(server_args.attention_backend_config or {})
+        config.setdefault("VSA_sparsity", config.get("sparsity", 0.8))
+        config.setdefault("vsa_tile_size", 64)
+        if (
+            self.resolve_transformer_attention_backend(server_args)
+            is not AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3
+            or float(config["VSA_sparsity"]) != 0.8
+            or int(config["vsa_tile_size"]) != 64
+            or config.get("vsa_mode", "exempt") != "exempt"
+            or config.get("vsa_dense_layers", ())
+            or int(config.get("vsa_dense_first_n_steps", 0)) != 0
+        ):
+            raise ValueError(
+                "FastH3 8-Step V2 requires VIDEO_SPARSE_ATTN_H3, sparsity=0.8, tile_size=64, exempt prefix, and no dense overrides"
+            )
+        server_args.attention_backend_config = config
+        super().validate_server_args(server_args)
+
+
+__all__ = [
+    "FastH3PipelineConfig",
+    "FastH3EightStepPipelineConfig",
+    "MiniMaxH3PipelineConfig",
+]
 
 
 def register():
     from sglang.multimodal_gen.configs.sample.minimax_h3 import (
+        FastH3EightStepSamplingParams,
         FastH3SamplingParams,
         MiniMaxH3SamplingParams,
     )
@@ -388,6 +424,17 @@ def register():
         model_detectors=[
             lambda model_id: (
                 "fasth3" in model_id.lower().replace("-", "").replace("_", "")
+                and "8step" not in model_id.lower().replace("-", "").replace("_", "")
+            )
+        ],
+    )
+    register_configs(
+        sampling_param_cls=FastH3EightStepSamplingParams,
+        pipeline_config_cls=FastH3EightStepPipelineConfig,
+        hf_model_paths=["FastVideo/FastVideo-FastH3-8-Step-V2"],
+        model_detectors=[
+            lambda model_id: (
+                "fasth38stepv2" in model_id.lower().replace("-", "").replace("_", "")
             )
         ],
     )

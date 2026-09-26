@@ -19,12 +19,29 @@ folds in the gated compression branch. Both replace chains of index copies
 and transposes that otherwise cost more than the attention kernel itself.
 """
 
+import functools
 import math
+import os
 
 import torch
 import triton
 import triton.language as tl
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from triton.tools.tensor_descriptor import TensorDescriptor
+
+logger = init_logger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _sm100a_provider():
+    from fastvideo_kernel.block_sparse_attn_sm100a import (
+        block_sparse_attn_sm100a,
+        is_supported,
+    )
+
+    logger.info("VSA-H3 provider=sm100a (fastvideo-kernel), tile_size=64")
+    return block_sparse_attn_sm100a, is_supported
+
 
 # BLOCK_M / BLOCK_N are structural, not tunable: the kernel indexes the top-k
 # list per BLOCK_M q-tile and addresses keys as kv_idx * BLOCK_N, so both must
@@ -109,7 +126,8 @@ def vsa_h3_block_sparse_attn_forward(
 ) -> torch.Tensor:
     """q/k/v: contiguous [B, H, S_pad, D] bf16 with S_pad = n_tiles * 64; pad
     rows zero. q2k_index/q2k_num: contiguous [B, H, n_tiles, max_kv] /
-    [B, H, n_tiles] int32."""
+    [B, H, n_tiles] int32.
+    """
     batch, heads, seq_q, head_dim = q.shape
     seq_kv = k.shape[2]
     if seq_q % VSA_H3_KERNEL_BLOCK or seq_kv % VSA_H3_KERNEL_BLOCK:
@@ -122,6 +140,31 @@ def vsa_h3_block_sparse_attn_forward(
             "variable_block_sizes must have one entry per 64-token key block: "
             f"{variable_block_sizes.numel()} vs {seq_kv // VSA_H3_KERNEL_BLOCK}"
         )
+    if os.environ.get("FASTVIDEO_VSA_SM100A", "0") == "1":
+        native_forward, is_supported = _sm100a_provider()
+        # A native CTA owns two adjacent query tiles. Append an empty tile
+        # only at the kernel boundary; routing and pooled compression continue
+        # to use the original logical tiles, including ragged interior tiles.
+        if variable_block_sizes.numel() % 2:
+            q, k, v = (
+                torch.nn.functional.pad(t, (0, 0, 0, VSA_H3_KERNEL_BLOCK))
+                for t in (q, k, v)
+            )
+            variable_block_sizes = torch.nn.functional.pad(variable_block_sizes, (0, 1))
+            q2k_index = torch.nn.functional.pad(q2k_index, (0, 0, 0, 1))
+            q2k_num = torch.nn.functional.pad(q2k_num, (0, 1))
+        if not is_supported(q, variable_block_sizes):
+            raise RuntimeError(
+                "FASTVIDEO_VSA_SM100A=1 requires the SM100a extension, SM100 GPU, and BF16 head_dim=128"
+            )
+        result, _ = native_forward(
+            q, k, v, q2k_index, q2k_num, variable_block_sizes, need_lse=False
+        )
+        result = result[:, :, :seq_q]
+        if out is not None:
+            out.copy_(result)
+            return out
+        return result
     if out is None:
         out = torch.empty_like(q)
     block = [1, 1, VSA_H3_KERNEL_BLOCK, head_dim]
@@ -323,7 +366,8 @@ def vsa_h3_untile(
 ) -> None:
     """Scatter ``out_tiled`` [H, S_pad, D] to packed rows of ``result`` [T, H, D]
     (rows past ``used`` are zero), adding ``out_compress`` [H, n_tiles, D] fp32
-    scaled by ``gate_tiled`` when given."""
+    scaled by ``gate_tiled`` when given.
+    """
     heads, seq_pad, head_dim = out_tiled.shape
     total = result.shape[0]
     has_gate = gate_tiled is not None

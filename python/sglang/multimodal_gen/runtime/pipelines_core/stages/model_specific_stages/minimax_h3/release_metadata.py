@@ -10,7 +10,9 @@ from typing import Any, Mapping
 from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.sample.sampling_params import QUALITY_LEVELS
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
+    PipelineStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.resolved_plan import (
     minimax_h3_plan_from_batch,
 )
@@ -51,6 +53,7 @@ class MiniMaxH3ReleaseMetadata:
     task_aliases: Mapping[str, str]
     video_sigma_shift: float
     audio_sigma_shift: float
+    denoising_sigmas: tuple[float, ...] | None = None
 
     @classmethod
     def from_model_index(
@@ -91,6 +94,24 @@ class MiniMaxH3ReleaseMetadata:
                 "model_index.json._minimax_h3.sigma_shift_scales requires numeric "
                 "video and audio values"
             ) from exc
+        grid = raw.get("denoising_sigmas")
+        if grid is not None:
+            if (
+                not isinstance(grid, list)
+                or len(grid) < 2
+                or any(
+                    isinstance(x, bool)
+                    or not isinstance(x, (int, float))
+                    or not math.isfinite(x)
+                    for x in grid
+                )
+                or not 0 < grid[0] <= 1
+                or grid[-1] != 0
+                or any(a <= b for a, b in zip(grid, grid[1:]))
+            ):
+                raise ValueError(
+                    "denoising_sigmas must strictly descend from (0, 1] to zero"
+                )
         metadata = cls(
             schema_version=1,
             partition=partition,
@@ -98,6 +119,7 @@ class MiniMaxH3ReleaseMetadata:
             task_aliases=dict(aliases),
             video_sigma_shift=video_sigma,
             audio_sigma_shift=audio_sigma,
+            denoising_sigmas=tuple(grid) if grid is not None else None,
         )
         for task in metadata.tasks:
             if canonical_minimax_h3_task(task) != task:
@@ -121,7 +143,10 @@ class MiniMaxH3ReleaseMetadata:
 
     @property
     def sigma_shift_scales(self) -> dict[str, float]:
-        return {"video": self.video_sigma_shift, "audio": self.audio_sigma_shift}
+        return {
+            "video": self.video_sigma_shift,
+            "audio": self.audio_sigma_shift,
+        }
 
     def canonical_task(self, task: str) -> str:
         normalized = task.strip().lower()

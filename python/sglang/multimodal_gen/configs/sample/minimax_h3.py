@@ -352,4 +352,26 @@ class FastH3SamplingParams(MiniMaxH3SamplingParams):
             )
 
 
-__all__ = ["FastH3SamplingParams", "MiniMaxH3SamplingParams"]
+@dataclass
+class FastH3EightStepSamplingParams(MiniMaxH3SamplingParams):
+    """FastH3 8-Step V2's nine sigma nodes, including the terminal zero."""
+
+    num_inference_steps: int = 9
+
+    def _validate(self) -> None:
+        super()._validate()
+        if self.num_inference_steps != 9:
+            raise ValueError(
+                "FastH3 8-Step V2 requires nine sigma nodes (eight forwards)"
+            )
+        if self.task is not None and self.task.strip().lower() != "t2va":
+            raise ValueError("FastH3 8-Step V2 is distilled for t2va only")
+        if self.guidance_scale != 1.0:
+            raise ValueError("FastH3 8-Step V2 requires guidance_scale=1.0")
+
+
+__all__ = [
+    "FastH3SamplingParams",
+    "FastH3EightStepSamplingParams",
+    "MiniMaxH3SamplingParams",
+]

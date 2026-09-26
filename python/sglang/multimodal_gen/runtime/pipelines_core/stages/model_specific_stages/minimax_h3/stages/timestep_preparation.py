@@ -10,7 +10,9 @@ import torch
 
 from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
+    PipelineStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
 )
@@ -26,12 +28,13 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
     deduplicated_tensor_tree_output_fields = ("timesteps", "sigmas")
     deduplicated_extra_tensor_tree_output_keys = (MINIMAX_H3_SIGMAS_EXTRA_KEY,)
 
-    def __init__(self, sigma_shift_scales=None) -> None:
+    def __init__(self, sigma_shift_scales=None, denoising_sigmas=None) -> None:
         super().__init__()
         # Per-model sigma shift override (model_index.json "_minimax_h3" release
         # block, sigma_shift_scales): the schedule constants are a MODEL
         # serving contract — fl2va and ref2va use video 12 / audio 3 by default.
         self.sigma_shift_scales = sigma_shift_scales
+        self.denoising_sigmas = denoising_sigmas
         self._pdd_config = None
         pdd_heads = envs.SGLANG_DIFFUSION_MINIMAX_H3_PDD_HEADS
         if pdd_heads:
@@ -80,6 +83,7 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
             plan.default_flow_shift,
             plan.default_audio_flow_shift,
             self.freeze_for_dedup(self.sigma_shift_scales),
+            self.denoising_sigmas,
         )
 
     def _apply_pdd_schedule(self, batch: Req) -> None:
@@ -199,6 +203,24 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
         }
         sigmas: dict[str, list[float]] = {}
         for modality in ("video", "audio"):
+            if self.denoising_sigmas is not None:
+                # Distilled checkpoints train on these exact FP32 nodes. A
+                # shorter warmup uses initial intervals from the same grid.
+                if not batch.is_warmup and requested_num_steps != len(
+                    self.denoising_sigmas
+                ):
+                    raise ValueError(
+                        "Requested steps do not match the distilled sigma grid"
+                    )
+                if scales[modality] != model_scales[modality]:
+                    raise ValueError(
+                        f"Distilled schedule requires {modality} shift={model_scales[modality]}"
+                    )
+                base = torch.tensor(self.denoising_sigmas, dtype=torch.float32)
+                shift = scales[modality]
+                shifted = shift * base / (1 + (shift - 1) * base)
+                sigmas[modality] = shifted[: max(2, requested_num_steps)].tolist()
+                continue
             sigmas[modality] = minimax_h3_time_shift_sigmas(
                 num_steps=requested_num_steps,
                 shift_scale=scales[modality],
