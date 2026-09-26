@@ -261,7 +261,8 @@ class _VideoSparseAttentionH3BackendResolver(_CudaAttentionBackendResolver):
 
     # The vendored Triton tile-64 kernel is written against Hopper and
     # Blackwell block-sparse geometry; older architectures fail closed.
-    supported_capabilities = {(9, 0), (10, 0), (10, 3)}
+    # SM120 runs the same Triton kernel with its shipped launch parameters.
+    supported_capabilities = {(9, 0), (10, 0), (10, 3), (12, 0)}
 
     @classmethod
     def resolve(cls, platform) -> str:
@@ -273,7 +274,8 @@ class _VideoSparseAttentionH3BackendResolver(_CudaAttentionBackendResolver):
             found = capability.as_version_str() if capability else "unknown"
             raise ValueError(
                 "VSA-H3 (video_sparse_attn_h3) needs compute capability 9.0 "
-                "(Hopper), 10.0 (B200 / GB200) or 10.3 (B300 / GB300); "
+                "(Hopper), 10.0 (B200 / GB200), 10.3 (B300 / GB300) or 12.0 "
+                "(RTX PRO 6000 Blackwell / RTX 50); "
                 f"this device reports {found}."
             )
         try:
