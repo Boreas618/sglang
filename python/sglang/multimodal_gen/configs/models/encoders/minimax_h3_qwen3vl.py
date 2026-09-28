@@ -35,6 +35,9 @@ class MiniMaxH3Qwen3VLConfig(Qwen3VLConfig):
     arch_config: MiniMaxH3Qwen3VLArchConfig = field(
         default_factory=MiniMaxH3Qwen3VLArchConfig
     )
+    # Text-only deployments (t2va) never encode images or video frames; false
+    # leaves the vision tower unbuilt and its checkpoint tensors unread.
+    load_vision_tower: bool = True
 
     def post_diffusers_config_update(self) -> None:
         """Select the in-tree extractor after loading the HF architecture."""

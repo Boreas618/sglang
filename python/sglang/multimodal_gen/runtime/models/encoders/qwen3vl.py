@@ -692,6 +692,7 @@ class Qwen3VLModel(nn.Module):
         quant_config: QuantizationConfig | None = None,
         use_tensor_parallel: bool = False,
         prefix: str = "",
+        load_vision_tower: bool = True,
     ):
         super().__init__()
         vision_quant_config = (
@@ -699,10 +700,15 @@ class Qwen3VLModel(nn.Module):
             if quant_config is not None and quant_config.supports_srt_linear_layers
             else None
         )
-        self.visual = Qwen3VLVisionTransformer(
-            config.vision_config,
-            quant_config=vision_quant_config,
-            prefix=add_prefix("visual", prefix),
+        # A text-only caller never runs the vision tower and leaves it unbuilt.
+        self.visual = (
+            Qwen3VLVisionTransformer(
+                config.vision_config,
+                quant_config=vision_quant_config,
+                prefix=add_prefix("visual", prefix),
+            )
+            if load_vision_tower
+            else None
         )
         self.language_model = Qwen3VLTextModel(
             config.text_config,
@@ -915,6 +921,11 @@ class Qwen3VLModel(nn.Module):
         pixel_values: torch.FloatTensor,
         grid_thw: Optional[torch.LongTensor],
     ):
+        if self.visual is None:
+            raise ValueError(
+                "Qwen3-VL was built without its vision tower "
+                "(load_vision_tower=False); image and video inputs need it"
+            )
         visual_out = self.visual(pixel_values, grid_thw=grid_thw)
         return visual_out.pooler_output, visual_out.deepstack_features
 

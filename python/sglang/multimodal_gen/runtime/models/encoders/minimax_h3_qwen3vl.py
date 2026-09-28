@@ -43,10 +43,14 @@ def _map_checkpoint_name(name: str) -> str:
     return _MAP_CHECKPOINT_NAME(name)[0]
 
 
-def _is_unconsumed_checkpoint_weight(name: str, selected_layer: int) -> bool:
+def _is_unconsumed_checkpoint_weight(
+    name: str, *, selected_layer: int, load_vision_tower: bool
+) -> bool:
     """Weights intentionally absent from the selected feature extractor."""
 
     if name == "lm_head.weight" or name.startswith("model.language_model.norm."):
+        return True
+    if not load_vision_tower and name.startswith("model.visual."):
         return True
     match = _LAYER_WEIGHT_RE.match(name)
     return bool(match and int(match.group(1)) >= selected_layer)
@@ -207,6 +211,8 @@ class MiniMaxH3Qwen3VLEncoder(TextEncoder):
     ]
 
     supports_dp_encode = True
+    # Set per instance from MiniMaxH3Qwen3VLConfig.load_vision_tower.
+    load_vision_tower = True
     param_names_mapping = _PARAM_NAMES_MAPPING
     # Comfy packs the vision tower across whole tensors rather than rows. Keep
     # its language/vocabulary matrices packed and restore this smaller tower.
@@ -259,7 +265,11 @@ class MiniMaxH3Qwen3VLEncoder(TextEncoder):
         name = _map_checkpoint_name(name)
         return (
             "rotary_emb.inv_freq" not in name
-            and not _is_unconsumed_checkpoint_weight(name, self.selected_lm_layer)
+            and not _is_unconsumed_checkpoint_weight(
+                name,
+                selected_layer=self.selected_lm_layer,
+                load_vision_tower=self.load_vision_tower,
+            )
         )
 
     def __init__(self, config: MiniMaxH3Qwen3VLConfig) -> None:
@@ -271,11 +281,13 @@ class MiniMaxH3Qwen3VLEncoder(TextEncoder):
                 "MiniMax H3 Qwen3-VL language-layer configuration is "
                 f"inconsistent: {selected_layer} vs {int(arch.num_hidden_layers)}"
             )
+        self.load_vision_tower = config.load_vision_tower
         self.model = Qwen3VLModel(
             arch,
             quant_config=config.quant_config,
             use_tensor_parallel=True,
             prefix="model",
+            load_vision_tower=self.load_vision_tower,
         )
         # H3 and ClipProj consume an unnormalized intermediate residual stream.
         self.model.language_model.norm = nn.Identity()

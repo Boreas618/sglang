@@ -308,6 +308,12 @@ def minimax_h3_encode_reference_audio_rows(
     "duration_seconds": float}.
     """
     model = audio_vae
+    if model.encoder is None:
+        raise RuntimeError(
+            "MiniMax H3 audio VAE was loaded without its encoder "
+            "(audio_vae_config.load_encoder=false); reference audio needs it, "
+            "so serve ref2va with the encoder loaded"
+        )
     device = next(model.parameters()).device
     waveform, source_rate = _load_waveform(
         audio_path,

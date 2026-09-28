@@ -24,6 +24,13 @@ class MiniMaxH3AudioVAEConfig(VAEConfig):
     load_encoder: bool = True
     load_decoder: bool = True
 
+    def skipped_checkpoint_prefixes(self) -> tuple[str, ...]:
+        # Reference-audio encoding runs encoder -> pre_block -> mean_proj
+        # (logs_proj is the unused variance head); decode reads none of them.
+        if self.load_encoder:
+            return ()
+        return ("encoder.", "pre_block.", "mean_proj.", "logs_proj.")
+
     def update_model_arch(self, source_model_dict: dict) -> None:
         # Native-Diffusers AutoencoderKLMiniMaxH3Audio config field name.
         aliases = {"sampling_rate": "sample_rate"}

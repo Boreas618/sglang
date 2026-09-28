@@ -1218,6 +1218,8 @@ class AutoencoderKLLegacy(AutoencoderKL):
         scaling_factor=1.0,
         # pixel normalization
         pixel_norm_type="imagenet",
+        # decode-only deployments leave the encoder side unbuilt
+        load_encoder=True,
         # others
         **kwargs,
     ):
@@ -1261,10 +1263,13 @@ class AutoencoderKLLegacy(AutoencoderKL):
             "causal": causal_encoder,
             "use_t_isolated_gn": use_t_isolated_gn,
         }
-        self.encoder = EncoderFCN3D(**encoder_config)
-
-        # init pointwise quant/post_quant conv
-        self.quant_conv = nn.Conv3d(z_channels * 2, 2 * embed_dim, 1)
+        # quant_conv only consumes encoder output, so both are encode-side.
+        if load_encoder:
+            self.encoder = EncoderFCN3D(**encoder_config)
+            self.quant_conv = nn.Conv3d(z_channels * 2, 2 * embed_dim, 1)
+        else:
+            self.encoder = None
+            self.quant_conv = None
         self.post_quant_conv = nn.Conv3d(embed_dim, z_channels, 1)
 
         self.use_vit_decoder = use_vit_decoder
@@ -1282,6 +1287,13 @@ class AutoencoderKLLegacy(AutoencoderKL):
 
     @torch.no_grad()
     def encode(self, x):
+        # Every image and video encode path (tiled or not) ends here.
+        if self.encoder is None:
+            raise RuntimeError(
+                "MiniMax H3 video VAE was loaded without its encoder "
+                "(vae_config.load_encoder=false); image and video conditioning "
+                "need it, so serve those tasks with the encoder loaded"
+            )
         return self.quant_conv(self.encoder(x))
 
     @torch.no_grad()

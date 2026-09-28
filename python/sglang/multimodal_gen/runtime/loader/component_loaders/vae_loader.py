@@ -420,8 +420,20 @@ def _assign_direct_gpu_vae_state(
     vae_config: VAEConfig,
 ) -> tuple[int, tuple[str, ...]]:
     """Stream a complete standard VAE state directly onto its target device."""
+    skipped_prefixes = vae_config.skipped_checkpoint_prefixes()
+    # Tensors of modules the config leaves unbuilt never reach a slot.
+    key_filter = (
+        (lambda name: not name.startswith(skipped_prefixes))
+        if skipped_prefixes
+        else None
+    )
     num_deparameterized = adopt_plain_weight_norm_state(
-        vae, _vae_checkpoint_tensor_names(weight_files)
+        vae,
+        {
+            name
+            for name in _vae_checkpoint_tensor_names(weight_files)
+            if not name.startswith(skipped_prefixes)
+        },
     )
     target_state, slots = _direct_gpu_vae_state_slots(vae, component_name)
     metadata_names = _vae_checkpoint_arch_metadata_names(vae_config, target_state)
@@ -429,7 +441,7 @@ def _assign_direct_gpu_vae_state(
     metadata: dict[str, torch.Tensor] = {}
     with torch.no_grad():
         for raw_name, tensor in safetensors_weights_iterator(
-            weight_files, to_cpu=device.type == "cpu"
+            weight_files, to_cpu=device.type == "cpu", key_filter=key_filter
         ):
             name = raw_name
             if name in metadata_names:
@@ -698,6 +710,20 @@ class VAELoader(WeightOverrideComponentLoader):
         loaded = {}
         for sf_path in safetensors_list:
             loaded.update(_load_safetensors_file(sf_path))
+        # Drop exactly the tensors of modules the config leaves unbuilt, so a
+        # strict native load still rejects anything else it does not expect.
+        # DacVAEConfig sits outside the VAEConfig hierarchy and declares none.
+        skipped_prefixes = (
+            vae_config.skipped_checkpoint_prefixes()
+            if isinstance(vae_config, VAEConfig)
+            else ()
+        )
+        if skipped_prefixes:
+            loaded = {
+                name: tensor
+                for name, tensor in loaded.items()
+                if not name.startswith(skipped_prefixes)
+            }
         _backfill_ltx2_audio_vae_latent_stats(loaded, component_type)
         num_deparameterized = adopt_plain_weight_norm_state(vae, loaded)
         target_state = vae.state_dict()

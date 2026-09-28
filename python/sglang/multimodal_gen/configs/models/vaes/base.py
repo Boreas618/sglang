@@ -102,6 +102,14 @@ class VAEConfig(ModelConfig):
     def post_init(self):
         pass
 
+    def skipped_checkpoint_prefixes(self) -> tuple[str, ...]:
+        """Checkpoint tensor prefixes of modules this config leaves unbuilt.
+
+        The loader drops exactly these tensors before loading, so a VAE that
+        honors load_encoder/load_decoder still loads strictly.
+        """
+        return ()
+
     def auto_parallel_decode_prefers_spatial_shard(self) -> bool:
         return False
 

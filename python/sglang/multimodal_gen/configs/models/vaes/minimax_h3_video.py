@@ -56,6 +56,10 @@ class MiniMaxH3VideoVAEConfig(VAEConfig):
             f"{self.parallel_decode_mode!r}"
         )
 
+    def skipped_checkpoint_prefixes(self) -> tuple[str, ...]:
+        # encode() is quant_conv(encoder(x)); decode never reads either.
+        return () if self.load_encoder else ("encoder.", "quant_conv.")
+
     def update_model_arch(self, source_model_dict: dict) -> None:
         # Native-Diffusers AutoencoderKLMiniMaxH3 config field names.
         aliases = {

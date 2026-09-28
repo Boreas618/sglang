@@ -78,6 +78,7 @@ class MiniMaxH3VideoVAE(AutoencoderKLLegacy, LayerwiseOffloadableModuleMixin):
             encoder_parallel=False,
             decoder_parallel=False,
             chunk_dim=int(arch.vae_chunk_dim),
+            load_encoder=config.load_encoder,
         )
         self.sglang_config = config
         self.use_parallel_decode = config.use_parallel_decode
@@ -109,6 +110,7 @@ class MiniMaxH3AudioVAE(DacAudioVAE, LayerwiseOffloadableModuleMixin):
             vae_latent_channels=32,
             attn_proj=True,
             decoder_type="bigvgan",
+            load_encoder=config.load_encoder,
         )
         self.config = config
 

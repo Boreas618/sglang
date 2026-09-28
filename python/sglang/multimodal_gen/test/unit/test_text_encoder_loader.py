@@ -521,6 +521,98 @@ class TestMiniMaxH3CheckpointFilter(unittest.TestCase):
         torch.testing.assert_close(layer.self_attn.q_proj.weight, source)
 
 
+def _tiny_h3_qwen3vl_encoder(pipeline_config) -> MiniMaxH3Qwen3VLEncoder:
+    from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+        maybe_init_distributed_environment_and_model_parallel,
+        model_parallel_is_initialized,
+    )
+    from sglang.multimodal_gen.test.single_test_file.component_accuracy.utils import (
+        ensure_distributed_env_defaults,
+    )
+    from sglang.srt.layers.rotary_embedding import base as rope_base
+    from sglang.srt.runtime_context import get_parallel
+
+    if not model_parallel_is_initialized():
+        ensure_distributed_env_defaults()
+        maybe_init_distributed_environment_and_model_parallel(tp_size=1, sp_size=1)
+    config = pipeline_config.text_encoder_configs[0]
+    hf_config = transformers.Qwen3VLConfig(
+        text_config=dict(
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=50,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=8,
+            vocab_size=32,
+            rope_scaling={
+                "mrope_interleaved": True,
+                "mrope_section": [2, 1, 1],
+                "rope_type": "default",
+            },
+        ),
+        vision_config=dict(
+            depth=0,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=2,
+            out_hidden_size=16,
+            patch_size=2,
+            spatial_merge_size=2,
+            temporal_patch_size=1,
+            deepstack_visual_indexes=[],
+            num_position_embeddings=16,
+        ),
+    )
+    for key, value in hf_config.__dict__.items():
+        setattr(config.arch_config, key, value)
+    config.post_diffusers_config_update()
+    # The rope layer picks a host kernel only on a CPU engine; construction
+    # never runs it.
+    with (
+        get_parallel().override(tp_size=1, tp_rank=0),
+        mock.patch.object(rope_base, "_is_cpu", True),
+    ):
+        return MiniMaxH3Qwen3VLEncoder(config)
+
+
+def test_text_only_h3_encoder_loads_checkpoint_minus_vision_tower():
+    """load_vision_tower=false (set through the pipeline config, as a deployment
+    does) must skip exactly the vision tower's tensors, load the rest without a
+    gap, and refuse image input instead of running a missing tower."""
+    from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
+        FastH3EightStepPipelineConfig,
+    )
+
+    text_only_config = FastH3EightStepPipelineConfig()
+    text_only_config.update_pipeline_config(
+        {"text_encoder_configs": [{"load_vision_tower": False}]}
+    )
+    checkpoint = _tiny_h3_qwen3vl_encoder(FastH3EightStepPipelineConfig()).state_dict()
+    encoder = _tiny_h3_qwen3vl_encoder(text_only_config)
+
+    materialized = {
+        name
+        for name in checkpoint
+        if encoder.should_materialize_checkpoint_weight(name)
+    }
+    assert set(checkpoint) - materialized == {
+        name for name in checkpoint if name.startswith("model.visual.")
+    }
+    assert set(checkpoint) - materialized
+    loaded = encoder.load_weights(
+        (name, checkpoint[name]) for name in sorted(materialized)
+    )
+    assert set(dict(encoder.named_parameters())) == loaded
+
+    with pytest.raises(ValueError, match="vision tower"):
+        encoder.encode_ids(
+            torch.tensor([1, 2, 3]),
+            pixel_values=torch.zeros(4, 12),
+            image_grid_thw=torch.tensor([[1, 2, 2]]),
+        )
+
+
 class TestMiniMaxH3ConditioningProjection(unittest.TestCase):
     @staticmethod
     def _save_projection(path, tensors):

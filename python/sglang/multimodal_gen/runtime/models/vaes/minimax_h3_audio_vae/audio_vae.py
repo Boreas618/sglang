@@ -240,6 +240,7 @@ class DacAudioVAE(nn.Module):
         vae_latent_channels: int = 64,
         attn_proj: bool = False,
         decoder_type: str = "bigvgan",
+        load_encoder: bool = True,
     ):
         super().__init__()
 
@@ -257,7 +258,11 @@ class DacAudioVAE(nn.Module):
         self.latent_dim = latent_dim
 
         self.hop_length = np.prod(encoder_rates)
-        self.encoder = Encoder(encoder_dim, encoder_rates, latent_dim)
+        # Decode starts at dec_in_proj; a decode-only deployment leaves the
+        # encode side (encoder, pre_block, mean/logs heads) unbuilt.
+        self.encoder = (
+            Encoder(encoder_dim, encoder_rates, latent_dim) if load_encoder else None
+        )
 
         if latent_dim % vae_latent_channels == 0:
             self.attn_proj_dim = vae_latent_channels
@@ -265,8 +270,12 @@ class DacAudioVAE(nn.Module):
             # smallest power of two >= vae_latent_channels
             self.attn_proj_dim = 2 ** int(np.ceil(np.log2(vae_latent_channels)))
 
-        self.mean_proj = nn.Conv1d(self.attn_proj_dim, vae_latent_channels, 1)
-        self.logs_proj = nn.Conv1d(self.attn_proj_dim, vae_latent_channels, 1)
+        if load_encoder:
+            self.mean_proj = nn.Conv1d(self.attn_proj_dim, vae_latent_channels, 1)
+            self.logs_proj = nn.Conv1d(self.attn_proj_dim, vae_latent_channels, 1)
+        else:
+            self.mean_proj = None
+            self.logs_proj = None
 
         self.dec_in_proj = nn.Conv1d(vae_latent_channels, latent_dim, 1)
 
@@ -307,7 +316,7 @@ class DacAudioVAE(nn.Module):
         else:
             raise ValueError(f"Invalid decoder type: {self.decoder_type}")
 
-        if self.attn_proj:
+        if self.attn_proj and load_encoder:
             self.pre_block = AttnProjection(latent_dim, self.attn_proj_dim, num_heads=8)
 
         self.sample_rate = sample_rate
