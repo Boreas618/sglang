@@ -29,6 +29,7 @@ from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
     resolve_transformer_gguf_to_load,
     resolve_transformer_quant_load_spec,
 )
+from sglang.multimodal_gen.runtime.loader.utils import get_param_names_mapping
 from sglang.multimodal_gen.runtime.loader.weight_load_plan import WeightLoadPlan
 from sglang.multimodal_gen.runtime.models.registry import ModelRegistry
 from sglang.multimodal_gen.runtime.platforms import (
@@ -61,8 +62,21 @@ def _resolve_checkpoint_load_device(
     return runtime_device
 
 
-def _minimax_h3_adaln_cache_key_filter(name: str) -> bool:
-    return ".adaln_proj.linear." not in name
+def _minimax_h3_adaln_cache_key_filter(
+    param_names_mapping: dict,
+) -> Callable[[str], bool]:
+    """Skip checkpoint tensors of the adaln_proj modules AdaLN cache modes prune.
+
+    The filter sees raw checkpoint names, before any layout conversion, so each
+    name is mapped the way the loader will map it: Diffusers norm_out.linear
+    is the final layer's adaln_proj.
+    """
+    mapping = get_param_names_mapping(param_names_mapping)
+
+    def keep(name: str) -> bool:
+        return ".adaln_proj.linear." not in mapping(name)[0]
+
+    return keep
 
 
 def _default_quantized_attention_backend(
@@ -418,7 +432,9 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             init_params["adaln_cache_model_variant"] = (
                 component_server_args.model_variant
             )
-            checkpoint_key_filter = _minimax_h3_adaln_cache_key_filter
+            checkpoint_key_filter = _minimax_h3_adaln_cache_key_filter(
+                dit_config.arch_config.param_names_mapping
+            )
         if component_server_args.minimax_h3_adaln_online:
             if not is_minimax_h3:
                 raise ValueError(
@@ -429,17 +445,9 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                     "--minimax-h3-adaln-online and --minimax-h3-adaln-cache-path "
                     "are mutually exclusive"
                 )
-            if dit_config.arch_config.checkpoint_uses_diffusers_layout:
-                # The rebuild reads native tensor names straight from the
-                # shards; on a Diffusers-layout checkpoint it would KeyError
-                # on the first request instead of failing here.
-                raise ValueError(
-                    "--minimax-h3-adaln-online requires the native-layout "
-                    "MiniMax H3 checkpoint (FL2VA/transformer or "
-                    "Ref2VA/transformer), not the Diffusers-layout one"
-                )
             # Keep the weights off-device; the model rebuilds the AdaLN
-            # outputs from the checkpoint for each request's timestep plan.
+            # outputs from the checkpoint for each request's timestep plan,
+            # resolving native or Diffusers tensor names at construction.
             init_params["adaln_weight_files"] = safetensors_list
             init_params["adaln_plan_width"] = (
                 component_server_args.minimax_h3_adaln_plan_width
@@ -453,7 +461,9 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             init_params["adaln_precision"] = (
                 "fp32" if envs.SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32 else "match"
             )
-            checkpoint_key_filter = _minimax_h3_adaln_cache_key_filter
+            checkpoint_key_filter = _minimax_h3_adaln_cache_key_filter(
+                dit_config.arch_config.param_names_mapping
+            )
 
         runtime_quant_config = init_params["quant_config"]
         if runtime_quant_config is not None:

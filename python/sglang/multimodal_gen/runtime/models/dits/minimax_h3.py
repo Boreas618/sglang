@@ -8,7 +8,6 @@ contract accepts packed inference keyword arguments and returns packed logits.
 from __future__ import annotations
 
 import math
-import os
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from typing import Any, Callable
@@ -84,7 +83,7 @@ from sglang.multimodal_gen.runtime.models.dits.minimax_h3_adaln_cache import (
     _plan_key as _adaln_plan_key,
 )
 from sglang.multimodal_gen.runtime.models.dits.minimax_h3_adaln_cache import (
-    native_adaln_weight_files,
+    safetensors_weight_files,
 )
 from sglang.multimodal_gen.runtime.models.dits.minimax_h3_vdn_attention import (
     MiniMaxH3VDNHybridAttention,
@@ -1643,14 +1642,24 @@ class MiniMaxH3FinalLayer(nn.Module):
         return self._project(h)
 
 
-def _reject_adaln_lora(names: list[str]) -> None:
+def _reject_adaln_lora(names: list[str], *, param_names_mapping: dict) -> None:
     """Reject LoRA names touching adaln_proj; callers gate on cache mode.
 
     Cache modes prune the adaln_proj modules, so these deltas have nothing to
     attach to: they would be dropped without a trace while the rebuild keeps
-    reading base weights from the checkpoint.
+    reading base weights from the checkpoint. Names are matched after the
+    checkpoint-name mapping, so Diffusers aliases (norm_out.linear) count too;
+    IPC passes bare module prefixes, which only map with a parameter suffix.
     """
-    adaln_names = sorted(name for name in names if "adaln_proj" in name)
+    mapping = get_param_names_mapping(param_names_mapping)
+    adaln_names = sorted(
+        name
+        for name in names
+        if any(
+            "adaln_proj" in mapping(candidate)[0]
+            for candidate in (name, f"{name}.weight")
+        )
+    )
     if not adaln_names:
         return
     raise ValueError(
@@ -1684,7 +1693,9 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         """Project released-checkpoint AdaLN LoRAs onto pruned coordinates."""
         _reject_non_lora_delta_tensors(adapter)
         if self._adaln_precomputed:
-            _reject_adaln_lora(list(adapter))
+            _reject_adaln_lora(
+                list(adapter), param_names_mapping=self.param_names_mapping
+            )
         full_width = self.arch.adaln_affine_input_dim
         if full_width is None:
             return adapter
@@ -1773,7 +1784,9 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
 
     def validate_lora_layers(self, layer_names: list[str]) -> None:
         if self._adaln_precomputed:
-            _reject_adaln_lora(layer_names)
+            _reject_adaln_lora(
+                layer_names, param_names_mapping=self.param_names_mapping
+            )
 
     def validate_weight_update_source(self, *, weights_path: str | None) -> None:
         """Reject a weight update the AdaLN cache cannot follow.
@@ -1801,17 +1814,14 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                 "adaln_proj tensors have no resident modules to land in); "
                 "use update_weights_from_disk instead"
             )
-        if not (
-            os.path.isdir(weights_path) and native_adaln_weight_files(weights_path)
-        ):
-            # The rebuild streams native tensor names; a Diffusers-layout or
-            # quantized export would defer a KeyError to the next request.
+        try:
+            cache.resolve_weight_sources(safetensors_weight_files(weights_path))
+        except ValueError as error:
             raise ValueError(
                 "MiniMax H3 --minimax-h3-adaln-online cannot retarget its "
-                f"AdaLN rebuild at {weights_path!r} (no native adaln_proj "
-                "safetensors there), and rebuilding from the original "
-                "checkpoint would serve stale conditioning"
-            )
+                f"AdaLN rebuild at {weights_path!r} ({error}), and rebuilding "
+                "from the original checkpoint would serve stale conditioning"
+            ) from error
 
     def refresh_weight_derived_caches(self, *, weights_path: str | None) -> None:
         """Drop cached AdaLN plans after a weight swap; retarget the rebuild.
@@ -1826,7 +1836,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         # rejected every source this cannot follow; anything else is a broken
         # call order rather than a deployment the cache can degrade through.
         self.validate_weight_update_source(weights_path=weights_path)
-        cache.weight_files = native_adaln_weight_files(weights_path)
+        cache.retarget(safetensors_weight_files(weights_path))
         cache.invalidate()
 
     def _can_batch_block_adaln(self) -> bool:

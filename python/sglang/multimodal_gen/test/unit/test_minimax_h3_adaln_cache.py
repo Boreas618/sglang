@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors import SafetensorError
+from safetensors.torch import safe_open, save_file
 
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
     MINIMAX_H3_ADALN_MODALITY_NUM,
@@ -37,9 +38,26 @@ def _ensure_single_process_parallel_runtime() -> None:
     maybe_init_distributed_environment_and_model_parallel(tp_size=1, sp_size=1)
 
 
-def _weights_fill(*shape: int, scale: float) -> torch.Tensor:
+def _weights_fill(*shape: int, scale: float, salt: int = 0) -> torch.Tensor:
     values = torch.arange(int(torch.tensor(shape).prod()), dtype=torch.float32)
-    return ((values % 7) * 0.01 * scale).reshape(shape)
+    return (((values + salt) % 7) * 0.01 * scale).reshape(shape)
+
+
+# Checkpoint prefixes of each layout for the adaln_proj linears: native names
+# are the model's own, Diffusers names reach them through the arch mapping.
+_ADALN_PREFIXES = {
+    "native": (
+        [f"blocks.{layer}.adaln_proj.linear" for layer in range(_ARCH.num_layers)],
+        "final_layer.adaln_proj.linear",
+    ),
+    "diffusers": (
+        [
+            f"transformer_blocks.{layer}.adaln_proj.linear"
+            for layer in range(_ARCH.num_layers)
+        ],
+        "norm_out.linear",
+    ),
+}
 
 
 def _write_online_weights(
@@ -47,22 +65,30 @@ def _write_online_weights(
     *,
     omit: str | None = None,
     scale: float = 0.0,
+    dtype: torch.dtype = torch.bfloat16,
+    layout: str = "native",
+    extra: dict[str, torch.Tensor] | None = None,
 ) -> None:
     # State-machine tests only need checkpoint-compatible shapes (scale 0);
-    # value-equality tests pass a nonzero scale for distinguishable outputs.
-    def _fill(*shape: int) -> torch.Tensor:
-        return _weights_fill(*shape, scale=scale)
+    # value-equality tests pass a nonzero scale for distinguishable outputs,
+    # salted per tensor so a swapped layer cannot match by accident.
+    def _fill(*shape: int, salt: int) -> torch.Tensor:
+        return _weights_fill(*shape, scale=scale, salt=salt).to(dtype)
 
+    block_prefixes, final_prefix = _ADALN_PREFIXES[layout]
     tensors: dict[str, torch.Tensor] = {}
-    for layer in range(_ARCH.num_layers):
-        prefix = f"blocks.{layer}.adaln_proj.linear"
-        tensors[f"{prefix}.weight"] = _fill(_BLOCK_WIDTH, _ARCH.time_embed_dim)
-        tensors[f"{prefix}.bias"] = _fill(_BLOCK_WIDTH)
-    prefix = "final_layer.adaln_proj.linear"
-    tensors[f"{prefix}.weight"] = _fill(_FINAL_WIDTH, _ARCH.time_embed_dim)
-    tensors[f"{prefix}.bias"] = _fill(_FINAL_WIDTH)
+    for layer, prefix in enumerate(block_prefixes):
+        tensors[f"{prefix}.weight"] = _fill(
+            _BLOCK_WIDTH, _ARCH.time_embed_dim, salt=layer
+        )
+        tensors[f"{prefix}.bias"] = _fill(_BLOCK_WIDTH, salt=layer + 3)
+    tensors[f"{final_prefix}.weight"] = _fill(
+        _FINAL_WIDTH, _ARCH.time_embed_dim, salt=5
+    )
+    tensors[f"{final_prefix}.bias"] = _fill(_FINAL_WIDTH, salt=6)
     if omit is not None:
         tensors.pop(omit)
+    tensors.update(extra or {})
     save_file(tensors, path)
 
 
@@ -101,7 +127,8 @@ def _reference_block(cache, index, plan, num_timesteps):
 
 
 def _embed(timesteps: torch.Tensor) -> torch.Tensor:
-    return timesteps[:, None].expand(-1, _ARCH.time_embed_dim)
+    # 'match' mode projects the bf16 AdaLN input forward feeds adaln_proj.
+    return timesteps[:, None].expand(-1, _ARCH.time_embed_dim).bfloat16()
 
 
 def test_minimax_h3_adaln_cache_matches_bf16_embedding(tmp_path):
@@ -301,7 +328,7 @@ def test_host_tier_lru_eviction_and_shared_plan_refcount(tmp_path):
 def test_precision_fp32_projects_in_fp32_then_stores_bf16(tmp_path):
     _ensure_single_process_parallel_runtime()
     weight_path = tmp_path / "model.safetensors"
-    _write_online_weights(weight_path, scale=1.0)
+    _write_online_weights(weight_path, scale=1.0, dtype=torch.float32)
     cache = MiniMaxH3AdalnCache(
         _ARCH,
         weight_files=[str(weight_path)],
@@ -316,15 +343,17 @@ def test_precision_fp32_projects_in_fp32_then_stores_bf16(tmp_path):
         # The production embed stays fp32 in this mode; a bf16 input here
         # proves the cache upcasts before the projection (a 'match'-style
         # bf16 x fp32 GEMM would fail on dtype mismatch).
-        return _embed(timesteps).bfloat16()
+        return _embed(timesteps)
 
     cache.build([plan], embed=bf16_embed)
     slot = cache.resolve_slots([plan])[0]
 
     adaln_input = bf16_embed(plan).float()
-    weight = _weights_fill(_BLOCK_WIDTH, _ARCH.time_embed_dim, scale=1.0)
-    bias = _weights_fill(_BLOCK_WIDTH, scale=1.0)
     for layer in range(_ARCH.num_layers):
+        weight = _weights_fill(
+            _BLOCK_WIDTH, _ARCH.time_embed_dim, scale=1.0, salt=layer
+        )
+        bias = _weights_fill(_BLOCK_WIDTH, scale=1.0, salt=layer + 3)
         expected = torch.nn.functional.linear(adaln_input, weight, bias).bfloat16()
         got = torch.cat(_reference_block(cache, layer, slot, 1), dim=-1).reshape(
             1, _BLOCK_WIDTH
@@ -430,15 +459,107 @@ def test_online_cache_evicts_least_recently_used_plan_first(tmp_path):
 def test_online_cache_failed_rebuild_can_be_retried(tmp_path):
     """A failed rebuild must not publish a cache hit that blocks its retry."""
     missing_name = "final_layer.adaln_proj.linear.bias"
-    cache = _online_cache(tmp_path, omit=missing_name)
+    cache = _online_cache(tmp_path)
     plan_a = torch.tensor([1.0])
+    # The source resolved at construction; losing a tensor afterwards makes
+    # the read fail after every block layer has already been written.
+    _write_online_weights(tmp_path / "model.safetensors", omit=missing_name)
 
-    with pytest.raises(KeyError, match=missing_name):
+    with pytest.raises(SafetensorError, match=missing_name):
         cache.build([plan_a], embed=_embed)
 
     _write_online_weights(tmp_path / "model.safetensors")
     cache.build([plan_a], embed=_embed)
     cache.lookup(plan_a)
+
+
+def _layout_cache(directory: Path, *, layout: str, extra=None) -> MiniMaxH3AdalnCache:
+    _ensure_single_process_parallel_runtime()
+    directory.mkdir()
+    weight_path = directory / "model.safetensors"
+    _write_online_weights(weight_path, scale=1.0, layout=layout, extra=extra)
+    cache = MiniMaxH3AdalnCache(
+        _ARCH, weight_files=[str(weight_path)], max_plans=2, max_plan_width=2
+    )
+    cache.load(torch.device("cpu"))
+    return cache
+
+
+def test_online_rebuild_reads_diffusers_layout_like_native(tmp_path):
+    """A Diffusers-named checkpoint must rebuild the same bits as the native
+    one: both are one set of adaln_proj values under two naming schemes."""
+    # Neighbors a name-based rule could confuse with the AdaLN projections:
+    # norm_out.norm shares the final layer's prefix, to_q maps to a merge.
+    neighbors = {
+        "norm_out.norm.weight": torch.ones(_ARCH.hidden_size),
+        "transformer_blocks.0.attn.to_q.weight": torch.ones(2, 2),
+    }
+    native = _layout_cache(tmp_path / "native", layout="native")
+    diffusers = _layout_cache(
+        tmp_path / "diffusers", layout="diffusers", extra=neighbors
+    )
+    plans = [torch.tensor([0.25, 0.75]), torch.tensor([0.5])]
+    for cache in (native, diffusers):
+        cache.build(plans, embed=_embed)
+
+    assert torch.equal(diffusers.block_params, native.block_params)
+    assert torch.equal(diffusers.final_params, native.final_params)
+    # Guard against both layouts reading the same wrong tensor: the final
+    # layer must equal the bf16 projection the resident module computes.
+    slot = diffusers.resolve_slots([plans[0]])[0]
+    weight = _weights_fill(_FINAL_WIDTH, _ARCH.time_embed_dim, scale=1.0, salt=5)
+    bias = _weights_fill(_FINAL_WIDTH, scale=1.0, salt=6)
+    expected = torch.nn.functional.linear(
+        _embed(plans[0]), weight.bfloat16(), bias.bfloat16()
+    )
+    assert torch.equal(torch.cat(diffusers.final(slot, 2), dim=-1), expected)
+
+
+@pytest.mark.parametrize(
+    "extra, omit, message",
+    [
+        (None, "norm_out.linear.bias", "lacks 1 adaln_proj"),
+        # Pruned exports name the final bias norm_out.folded_bias; a file
+        # carrying both spellings is ambiguous, not a free choice.
+        ({"norm_out.folded_bias": torch.zeros(_FINAL_WIDTH)}, None, "two"),
+    ],
+)
+def test_online_rebuild_source_must_name_each_projection_once(
+    tmp_path, extra, omit, message
+):
+    _ensure_single_process_parallel_runtime()
+    weight_path = tmp_path / "model.safetensors"
+    _write_online_weights(weight_path, layout="diffusers", omit=omit, extra=extra)
+    with pytest.raises(ValueError, match=message):
+        MiniMaxH3AdalnCache(_ARCH, weight_files=[str(weight_path)])
+
+
+def test_adaln_key_filter_drops_exactly_the_rebuild_source(tmp_path):
+    """The load-time filter and the rebuild must agree on which checkpoint
+    tensors are adaln_proj, or a pruned module's tensor reaches the loader
+    (a warning, a hard error under FSDP) or a live one is dropped."""
+    from sglang.multimodal_gen.runtime.loader.component_loaders.transformer_loader import (
+        _minimax_h3_adaln_cache_key_filter,
+    )
+
+    neighbors = {
+        "norm_out.norm.weight": torch.ones(_ARCH.hidden_size),
+        "time_embedder.linear_1.weight": torch.ones(2, 2),
+        "transformer_blocks.0.attn.to_q.weight": torch.ones(2, 2),
+        "transformer_blocks.0.norm1.weight": torch.ones(2),
+    }
+    cache = _layout_cache(tmp_path / "diffusers", layout="diffusers", extra=neighbors)
+    weight_path = tmp_path / "diffusers" / "model.safetensors"
+    with safe_open(weight_path, framework="pt") as handle:
+        names = set(handle.keys())
+
+    keep = _minimax_h3_adaln_cache_key_filter(_ARCH.param_names_mapping)
+    dropped = {name for name in names if not keep(name)}
+
+    sources = cache.resolve_weight_sources([str(weight_path)])
+    assert dropped == {name for _, name in sources.values()}
+    assert "norm_out.linear.weight" in dropped
+    assert not dropped & set(neighbors)
 
 
 def test_online_cache_width_rejection_preserves_resident_plans(tmp_path):
@@ -489,25 +610,26 @@ def test_online_cache_rejects_tensor_weight_updates(tmp_path):
         model.validate_weight_update_source(weights_path=None)
 
 
-def test_online_cache_rejects_update_source_without_native_adaln(tmp_path):
+def test_online_cache_rejects_update_source_without_adaln_tensors(tmp_path):
     model = _cache_mode_model(_online_cache(tmp_path))
-    diffusers_layout = tmp_path / "diffusers"
-    diffusers_layout.mkdir()
-    save_file({"unrelated": torch.zeros(1)}, diffusers_layout / "model.safetensors")
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    save_file({"unrelated": torch.zeros(1)}, unrelated / "model.safetensors")
 
-    for weights_path in (str(diffusers_layout), str(tmp_path / "absent")):
-        with pytest.raises(ValueError, match="no native adaln_proj"):
+    for weights_path in (str(unrelated), str(tmp_path / "absent")):
+        with pytest.raises(ValueError, match="cannot retarget"):
             model.validate_weight_update_source(weights_path=weights_path)
 
 
-def test_disk_update_retargets_rebuild_source_and_drops_plans(tmp_path):
+@pytest.mark.parametrize("layout", ["native", "diffusers"])
+def test_disk_update_retargets_rebuild_source_and_drops_plans(tmp_path, layout):
     cache = _online_cache(tmp_path, max_plan_width=1)
     model = _cache_mode_model(cache)
     plan = torch.tensor([1.0])
     cache.build([plan], embed=_embed)
     updated = tmp_path / "updated"
     updated.mkdir()
-    _write_online_weights(updated / "model.safetensors")
+    _write_online_weights(updated / "model.safetensors", layout=layout)
 
     model.validate_weight_update_source(weights_path=str(updated))
     model.refresh_weight_derived_caches(weights_path=str(updated))
@@ -520,9 +642,11 @@ def test_disk_update_retargets_rebuild_source_and_drops_plans(tmp_path):
 def test_lora_ipc_layer_guard_rejects_adaln_in_cache_mode():
     """IPC passes module prefixes, not the '.lora_A' keys the disk path sees."""
     model = _cache_mode_model(None)
-    model.validate_lora_layers(["blocks.0.attn.qkv_proj"])
-    with pytest.raises(ValueError, match="adaln_proj"):
-        model.validate_lora_layers(["blocks.0.adaln_proj.linear"])
+    model.validate_lora_layers(["blocks.0.attn.qkv_proj", "norm_out.norm"])
+    # norm_out.linear is the Diffusers name of the final layer's adaln_proj.
+    for layer_name in ("blocks.0.adaln_proj.linear", "norm_out.linear"):
+        with pytest.raises(ValueError, match="adaln_proj"):
+            model.validate_lora_layers([layer_name])
 
 
 def _updater_for(model, model_path: str):

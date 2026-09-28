@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import glob
 import os
 import struct
 from collections import OrderedDict
@@ -27,6 +28,7 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_world_group,
     world_group_is_initialized,
 )
+from sglang.multimodal_gen.runtime.loader.utils import get_param_names_mapping
 from sglang.multimodal_gen.runtime.managers.memory_managers.host_memory_budget import (
     HOST_RESERVE_FRACTION,
     MIN_HOST_RESERVE_BYTES,
@@ -38,11 +40,6 @@ logger = init_logger(__name__)
 
 _BF16_DTYPE = torch.bfloat16
 _FP32_DTYPE = torch.float32
-
-# The native adaln_proj tensor names the online rebuild streams; a checkpoint
-# without them (Diffusers layout, quantized export) cannot serve as a rebuild
-# source.
-_NATIVE_ADALN_PROBE_KEY = "blocks.0.adaln_proj.linear.weight"
 
 
 # A ref2va request carrying both a visual and an audio reference reaches four
@@ -61,21 +58,61 @@ def _plan_key(timesteps: torch.Tensor) -> tuple[int, ...]:
     )
 
 
-def native_adaln_weight_files(weights_path: str) -> list[str]:
-    """Safetensors under ``weights_path`` usable as an online rebuild source.
+def safetensors_weight_files(weights_path: str) -> list[str]:
+    """The safetensors files directly under ``weights_path`` ([] if absent)."""
+    return sorted(glob.glob(os.path.join(weights_path, "*.safetensors")))
 
-    Returns [] when the directory holds no native-layout adaln tensors, so a
-    caller retargeting the rebuild source can fail closed instead of deferring
-    a KeyError to the next request.
+
+def _adaln_parameter_names(num_layers: int) -> list[str]:
+    prefixes = [f"blocks.{layer}.adaln_proj.linear" for layer in range(num_layers)]
+    prefixes.append("final_layer.adaln_proj.linear")
+    return [
+        f"{prefix}.{suffix}" for prefix in prefixes for suffix in ("weight", "bias")
+    ]
+
+
+def resolve_adaln_weight_sources(
+    weight_files: list[str],
+    *,
+    num_layers: int,
+    param_names_mapping: dict,
+) -> dict[str, tuple[str, str]]:
+    """Map every adaln_proj parameter to the (file, tensor name) holding it.
+
+    Checkpoint names go through the model's own checkpoint-name mapping, the
+    one the resident loader applies, so native and Diffusers-layout
+    checkpoints resolve alike. Raises ValueError unless each parameter comes
+    from exactly one checkpoint tensor that needs no merge; a rebuild source
+    that passes here cannot fail a request on a missing name.
     """
-    import glob as _glob
-
-    files = sorted(_glob.glob(os.path.join(weights_path, "*.safetensors")))
-    for file in files:
+    mapping = get_param_names_mapping(param_names_mapping)
+    targets = set(_adaln_parameter_names(num_layers))
+    sources: dict[str, tuple[str, str]] = {}
+    for file in weight_files:
         with safe_open(file, framework="pt", device="cpu") as handle:
-            if _NATIVE_ADALN_PROBE_KEY in handle.keys():
-                return files
-    return []
+            names = list(handle.keys())
+        for name in names:
+            target, merge_index, _ = mapping(name)
+            if target not in targets:
+                continue
+            if merge_index is not None:
+                raise ValueError(
+                    f"MiniMax H3 AdaLN rebuild cannot read {target!r}: checkpoint "
+                    f"tensor {name!r} is one slice of a merged parameter"
+                )
+            if target in sources:
+                raise ValueError(
+                    f"MiniMax H3 AdaLN rebuild found two checkpoint tensors for "
+                    f"{target!r}: {sources[target][1]!r} and {name!r}"
+                )
+            sources[target] = (file, name)
+    missing = sorted(targets - sources.keys())
+    if missing:
+        raise ValueError(
+            f"MiniMax H3 AdaLN rebuild source lacks {len(missing)} adaln_proj "
+            f"tensor(s), e.g. the one mapping to {missing[0]!r}"
+        )
+    return sources
 
 
 @contextmanager
@@ -421,13 +458,20 @@ class MiniMaxH3AdalnCache(nn.Module):
             )
         self.path = path
         self.model_variant = model_variant
-        self.weight_files = weight_files
         self.max_plans = max_plans
         self.max_plan_width = max_plan_width
         self.num_layers = arch.num_layers
         self.hidden_size = arch.hidden_size
+        self.param_names_mapping = arch.param_names_mapping
         self.block_width = 6 * MINIMAX_H3_ADALN_MODALITY_NUM * arch.hidden_size
         self.final_width = 2 * arch.hidden_size
+        # None selects the prebuilt sidecar; otherwise the rebuild source,
+        # resolved at construction so a checkpoint the rebuild cannot read
+        # fails the load rather than the first request.
+        self.weight_files: list[str] | None = None
+        self._weight_sources: dict[str, tuple[str, str]] = {}
+        if weight_files is not None:
+            self.retarget(weight_files)
         # Plan bit pattern -> slot, tracked on the host in LRU order (oldest
         # first). The rebuild path evicts per plan; a sidecar never evicts.
         self._slots: OrderedDict[tuple[int, ...], int] = OrderedDict()
@@ -438,6 +482,22 @@ class MiniMaxH3AdalnCache(nn.Module):
         self._host_tier: MiniMaxH3AdalnHostTier | None = None
         self.stats = MiniMaxH3AdalnCacheStats()
         self.rebuilds = 0
+
+    def resolve_weight_sources(
+        self, weight_files: list[str]
+    ) -> dict[str, tuple[str, str]]:
+        """Validate ``weight_files`` as a rebuild source without switching to it."""
+        return resolve_adaln_weight_sources(
+            weight_files,
+            num_layers=self.num_layers,
+            param_names_mapping=self.param_names_mapping,
+        )
+
+    def retarget(self, weight_files: list[str]) -> None:
+        """Rebuild later plans from ``weight_files``; built plans stay until
+        invalidate()."""
+        self._weight_sources = self.resolve_weight_sources(weight_files)
+        self.weight_files = list(weight_files)
 
     def load(self, device: torch.device) -> None:
         if self.path is None:
@@ -751,23 +811,27 @@ class MiniMaxH3AdalnCache(nn.Module):
         tp_rank: int,
         device: torch.device,
     ) -> None:
+        # The resident adaln_proj parameters are bf16 (curve checkpoints, the
+        # fp32 exception, cannot use this cache); 'match' rounds a checkpoint
+        # stored in another dtype exactly as the resident load does.
+        read_dtype = _FP32_DTYPE if self.precision == "fp32" else _BF16_DTYPE
         with ExitStack() as stack:
-            handles = [
-                stack.enter_context(safe_open(f, framework="pt", device=str(device)))
-                for f in self.weight_files
-            ]
-            index = {name: h for h in handles for name in h.keys()}
+            handles = {
+                file: stack.enter_context(
+                    safe_open(file, framework="pt", device=str(device))
+                )
+                for file in sorted({file for file, _ in self._weight_sources.values()})
+            }
 
-            def read_shard(name: str, out_features: int) -> torch.Tensor:
+            def read_shard(target: str, out_features: int) -> torch.Tensor:
+                file, name = self._weight_sources[target]
                 if tp_size == 1:
-                    tensor = index[name].get_tensor(name)
+                    tensor = handles[file].get_tensor(name)
                 else:
                     shard = out_features // tp_size
                     start = tp_rank * shard
-                    tensor = index[name].get_slice(name)[start : start + shard]
-                if self.precision == "fp32":
-                    tensor = tensor.float()
-                return tensor
+                    tensor = handles[file].get_slice(name)[start : start + shard]
+                return tensor.to(read_dtype)
 
             def project(adaln_input: torch.Tensor, weight, bias) -> torch.Tensor:
                 out = nn.functional.linear(adaln_input, weight, bias)
