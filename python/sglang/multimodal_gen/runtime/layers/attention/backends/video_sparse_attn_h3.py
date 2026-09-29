@@ -23,6 +23,7 @@ that activate the branch.
 
 import functools
 import math
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -274,9 +275,17 @@ def _workspace_key(
 
 
 class _Workspace:
-    """Per-geometry scratch: tiled q/k/v(/gate) [3|4, H, S_pad, D], pooled fp32
-    tile means [3, H, n_tiles, D], and the kernel index lists (prefix rows and
-    prefix columns are static; only the top-k video columns change per layer).
+    """Per-geometry scratch: tiled q/k/v(/gate) [3|4, H, S_kernel, D], pooled
+    fp32 tile means [3, H, n_tiles, D], and the kernel index lists (prefix rows
+    and prefix columns are static; only the top-k video columns change per
+    layer).
+
+    The native SM100a kernel pairs adjacent query tiles in one CTA and needs an
+    even tile count. With that kernel and an odd ``n_tiles``, the kernel-facing
+    storage (tiled rows, index-list rows, per-tile sizes) holds one more tile
+    that stays empty: zero rows, size 0, no attended keys. The kernel then reads
+    this storage in place; routing, pooling and untiling still see the logical
+    ``n_tiles`` through views, so no call pads or copies its operands.
     """
 
     def __init__(
@@ -289,24 +298,44 @@ class _Workspace:
         device: torch.device,
     ) -> None:
         n_tiles = meta.num_tiles
-        seq_pad = n_tiles * VSA_H3_TILE_ELEMS
+        self.native = os.environ.get("FASTVIDEO_VSA_SM100A", "0") == "1"
+        self.kernel_tiles = n_tiles + (n_tiles % 2 if self.native else 0)
+        kernel_seq = self.kernel_tiles * VSA_H3_TILE_ELEMS
         self.key = _workspace_key(meta, heads, head_dim, has_gate, dtype, device)
-        self.tiled = torch.empty(
-            (3 + int(has_gate), heads, seq_pad, head_dim), dtype=dtype, device=device
+        # Zeroed once: packing rewrites the logical tiles every call and never
+        # touches the empty kernel tile.
+        self.tiled = torch.zeros(
+            (3 + int(has_gate), heads, kernel_seq, head_dim),
+            dtype=dtype,
+            device=device,
         )
         self.pooled = torch.empty(
             (3, heads, n_tiles, head_dim), dtype=torch.float32, device=device
         )
-        self.out_tiled = torch.empty(
-            (heads, seq_pad, head_dim), dtype=dtype, device=device
+        # The native kernel returns its own output; only Triton writes here.
+        self.out_tiled = (
+            None
+            if self.native
+            else torch.empty((heads, kernel_seq, head_dim), dtype=dtype, device=device)
+        )
+        self.kernel_block_sizes = torch.zeros(
+            self.kernel_tiles,
+            dtype=meta.variable_block_sizes.dtype,
+            device=device,
         )
         all_tiles = torch.arange(n_tiles, dtype=torch.int32, device=device)
-        self.dense_index = all_tiles.repeat(heads, n_tiles, 1)
-        self.dense_num = torch.full(
-            (heads, n_tiles), n_tiles, dtype=torch.int32, device=device
+        index = torch.zeros(
+            (heads, self.kernel_tiles, n_tiles), dtype=torch.int32, device=device
         )
-        self.q2k_index = self.dense_index.clone()
-        self.q2k_num = self.dense_num.clone()
+        index[:, :n_tiles] = all_tiles
+        num = torch.zeros((heads, self.kernel_tiles), dtype=torch.int32, device=device)
+        num[:, :n_tiles] = n_tiles
+        self.dense_index_kernel, self.dense_num_kernel = index, num
+        self.q2k_index_kernel, self.q2k_num_kernel = index.clone(), num.clone()
+        self.dense_index = self.dense_index_kernel[:, :n_tiles]
+        self.dense_num = self.dense_num_kernel[:, :n_tiles]
+        self.q2k_index = self.q2k_index_kernel[:, :n_tiles]
+        self.q2k_num = self.q2k_num_kernel[:, :n_tiles]
 
     def sparse_lists(
         self, video_lists: torch.Tensor, num_prefix_tiles: int
@@ -315,6 +344,22 @@ class _Workspace:
         self.q2k_index[:, num_prefix_tiles:, :width] = video_lists
         self.q2k_num[:, num_prefix_tiles:] = width
         return self.q2k_index, self.q2k_num
+
+    def kernel_lists(
+        self, q2k_index: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Kernel-facing storage behind the logical lists `_select_kv_lists`
+        returned."""
+        if q2k_index is self.dense_index:
+            return self.dense_index_kernel, self.dense_num_kernel
+        return self.q2k_index_kernel, self.q2k_num_kernel
+
+    def block_sizes(self, variable_block_sizes: torch.Tensor) -> torch.Tensor:
+        """Per-tile sizes for the kernel: the logical sizes, then 0."""
+        if self.kernel_tiles == variable_block_sizes.numel():
+            return variable_block_sizes
+        self.kernel_block_sizes[: variable_block_sizes.numel()] = variable_block_sizes
+        return self.kernel_block_sizes
 
 
 def _get_workspace(
@@ -461,16 +506,17 @@ class VideoSparseAttentionH3Impl(AttentionImpl):
                 self.head_size**-0.5
             )
 
-        q2k_index, q2k_num = _select_kv_lists(ws, meta, scores, sparsity)
-        vsa_h3_block_sparse_attn_forward(
+        q2k_index, _ = _select_kv_lists(ws, meta, scores, sparsity)
+        kernel_index, kernel_num = ws.kernel_lists(q2k_index)
+        out_tiled = vsa_h3_block_sparse_attn_forward(
             ws.tiled[0:1],
             ws.tiled[1:2],
             ws.tiled[2:3],
-            q2k_index[None],
-            q2k_num[None],
-            meta.variable_block_sizes,
-            out=ws.out_tiled[None],
-        )
+            kernel_index[None],
+            kernel_num[None],
+            ws.block_sizes(meta.variable_block_sizes),
+            out=None if ws.native else ws.out_tiled[None],
+        )[0]
 
         out_compress = None
         if has_gate:
@@ -478,7 +524,7 @@ class VideoSparseAttentionH3Impl(AttentionImpl):
 
         result = torch.empty(query.shape, dtype=query.dtype, device=query.device)
         vsa_h3_untile(
-            ws.out_tiled,
+            out_tiled,
             ws.tiled[3] if has_gate else None,
             out_compress,
             meta.unpack_index,
