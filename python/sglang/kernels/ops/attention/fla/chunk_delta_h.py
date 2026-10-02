@@ -400,7 +400,29 @@ def chunk_gated_delta_rule_fwd_h(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
 
-    chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+    # For a six-head SM100 partition, BV=16 supplies 48 CTAs instead of 24.
+    # Select before launch: trying multiple configs would mutate the state
+    # pool during autotuning. Explicit launch overrides keep precedence.
+    sm100_six_head_prefill = (
+        B == N == 1
+        and T == 2048
+        and H == Hg == 6
+        and K == V == 128
+        and k.dtype == torch.bfloat16
+        and gk is not None
+        and use_exp2
+        and k.is_cuda
+        and torch.cuda.get_device_capability(k.device) == (10, 0)
+        and "SGLANG_GDN_CHUNK_H_BV" not in os.environ
+        and "SGLANG_GDN_CHUNK_H_NUM_WARPS" not in os.environ
+        and "SGLANG_GDN_CHUNK_H_NUM_STAGES" not in os.environ
+    )
+    launch = chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+    launch_options = {}
+    if sm100_six_head_prefill:
+        launch = launch.fn
+        launch_options = dict(BV=16, num_warps=4, num_stages=2)
+    launch[grid](
         k=k,
         v=u,
         w=w,
@@ -433,5 +455,6 @@ def chunk_gated_delta_rule_fwd_h(
         NT_BUCKET=(0 if NT <= 32 else (1 if NT <= 128 else 2)),
         USE_EXP2=use_exp2,
         TRACK_STATE=track_state is not None,
+        **launch_options,
     )
     return h, v_new

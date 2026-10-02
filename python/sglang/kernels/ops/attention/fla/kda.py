@@ -1197,6 +1197,19 @@ def chunk_kda_fwd(
     _H_pr = q.shape[-2]
     _B = q.shape[0]
     _small_grid = _B * _NT_pr * _H_pr <= 256
+    # SM100 six-head prefill benefits from a token-parallel diagonal while
+    # retaining fused inter-solve/recompute for this single-sequence shape.
+    _sm100_six_head_prefill = (
+        _B == 1
+        and q.shape[1] == 2048
+        and _H_pr == 6
+        and q.shape[-1] == v.shape[-1] == 128
+        and q.dtype == torch.bfloat16
+        and (cu_seqlens is None or cu_seqlens.numel() == 2)
+        and lower_bound is not None
+        and q.is_cuda
+        and torch.cuda.get_device_capability(q.device) == (10, 0)
+    )
     w, u, _, kg, Aqk, _ = chunk_kda_fwd_intra(
         q=q,
         k=k,
@@ -1208,7 +1221,7 @@ def chunk_kda_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         safe_gate=lower_bound is not None,
-        fuse_diagonal=_small_grid,
+        fuse_diagonal=_small_grid and not _sm100_six_head_prefill,
         fuse_recompute=_small_grid,
     )
 

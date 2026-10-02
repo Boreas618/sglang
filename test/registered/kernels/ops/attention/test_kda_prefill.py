@@ -4,7 +4,7 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
-from sglang.kernels.ops.attention.fla.kda import chunk_kda
+from sglang.kernels.ops.attention.fla.kda import chunk_kda, fused_recurrent_kda
 from sglang.kernels.ops.attention.linear.kda_nvidia_prefill import (
     chunk_kda_fwd as nvidia_chunk_kda_fwd,
 )
@@ -27,9 +27,9 @@ def _ptx_supported():
     return torch.cuda.is_available() and torch.cuda.get_device_capability() in SM_ARCHS
 
 
-def _inputs(seed, seq_len=128):
+def _inputs(seed, seq_len=128, num_heads=2):
     generator = torch.Generator(device="cuda").manual_seed(seed)
-    batch_size, num_heads, head_dim = 1, 2, 128
+    batch_size, head_dim = 1, 128
     shape = (batch_size, seq_len, num_heads, head_dim)
     q = torch.randn(shape, generator=generator, device="cuda", dtype=torch.bfloat16)
     k = torch.randn(shape, generator=generator, device="cuda", dtype=torch.bfloat16)
@@ -89,6 +89,68 @@ def _reference(q, k, v, gate, beta, a_log, dt_bias, state, fused_qk_norm):
 
 
 class TestKdaPrefill(CustomTestCase):
+    @torch.inference_mode()
+    def test_sm100_six_head_prefill_matches_recurrence(self):
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (
+            10,
+            0,
+        ):
+            self.skipTest("Six-head prefill specialization requires SM100")
+
+        q, k, v, gate, beta_logits, a_log, dt_bias, state = _inputs(
+            53, seq_len=2048, num_heads=6
+        )
+        q = F.normalize(q.float(), dim=-1).to(torch.bfloat16)
+        k = F.normalize(k.float(), dim=-1).to(torch.bfloat16)
+        beta = torch.sigmoid(beta_logits.float())
+        activated_gate = -5.0 * torch.sigmoid(
+            a_log.exp().view(1, 1, 6, 1) * (gate.float() + dt_bias.view(1, 1, 6, 128))
+        )
+        cu_seqlens = torch.tensor([0, 2048], device="cuda", dtype=torch.int32)
+        indices = torch.tensor([1], device="cuda", dtype=torch.int32)
+
+        for state_dtype in (torch.bfloat16, torch.float32):
+            with self.subTest(state_dtype=state_dtype):
+                # The selected slot lives in an envelope-strided pool, as in
+                # hybrid serving. The reference uses a contiguous single slot.
+                storage = torch.full(
+                    (4, *state.shape[1:]), 0.1, device="cuda", dtype=state_dtype
+                )
+                pool = storage[::2]
+                expected_output, expected_state = fused_recurrent_kda(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g=activated_gate,
+                    beta=beta,
+                    initial_state=pool[1:2].clone(),
+                    use_qk_l2norm_in_kernel=False,
+                    cu_seqlens=cu_seqlens,
+                )
+                actual_output = chunk_kda(
+                    q=q,
+                    k=k,
+                    v=v.clone(),
+                    g=gate,
+                    beta=beta,
+                    initial_state=pool,
+                    initial_state_indices=indices,
+                    cu_seqlens=cu_seqlens,
+                    A_log=a_log,
+                    dt_bias=dt_bias,
+                    lower_bound=-5.0,
+                )
+                torch.testing.assert_close(
+                    actual_output, expected_output, rtol=2e-2, atol=2e-3
+                )
+                torch.testing.assert_close(
+                    pool[1:2], expected_state, rtol=2e-2, atol=2e-3
+                )
+                untouched = storage[[0, 1, 3]]
+                torch.testing.assert_close(
+                    untouched, torch.full_like(untouched, 0.1), rtol=0, atol=0
+                )
+
     @torch.inference_mode()
     def test_ptx_padded_raw_beta(self):
         """Raw beta must match Triton, including final state after neutral padding."""
