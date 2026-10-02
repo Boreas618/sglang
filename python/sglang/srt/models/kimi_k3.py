@@ -1816,6 +1816,7 @@ class KimiK3DeltaAttention(nn.Module):
         # Set by _prepare_fused_decode() once weights are loaded.
         self._kda_fused_decode_ready = False
         self._kda_hip_fused_decode_ready = False
+        self._kda_fused_verify_onorm_ready = False
 
     def forward_qkvbfg(self, hidden_states: torch.Tensor):
         qkv, _ = self.qkv_proj(hidden_states)
@@ -1985,6 +1986,14 @@ class KimiK3DeltaAttention(nn.Module):
         w = layer.conv_weights
         if _is_npu:
             return
+        # Verify owns a complete output head independently of the TP8-only
+        # single-token decode kernel. Prepare its norm before that shape gate.
+        if layer.head_v_dim == 128 and tuple(self.o_norm.weight.shape) == (128,):
+            layer._k3_verify_onorm_args = (
+                self.o_norm.weight.detach().float().contiguous(),
+                float(self.o_norm.eps),
+            )
+            self._kda_fused_verify_onorm_ready = True
         seg = 12 * 128  # compiled for H = HV = 12 heads of 128 (TP8)
         if (
             w is None
@@ -2133,9 +2142,12 @@ class KimiK3DeltaAttention(nn.Module):
         # into the recurrence kernel. If the backend leaves the stash
         # unconsumed (env off or shape not covered), apply o_norm here as
         # before.
-        fused_onorm = (self._kda_fused_decode_ready or defer_f_b) and (
-            forward_batch.forward_mode.is_decode()
-            or forward_batch.forward_mode.is_target_verify()
+        fused_onorm = (
+            (self._kda_fused_decode_ready or defer_f_b)
+            and forward_batch.forward_mode.is_decode()
+        ) or (
+            self._kda_fused_verify_onorm_ready
+            and forward_batch.forward_mode.is_target_verify()
         )
         if fused_onorm:
             self.attn._k3_onorm_gate = g_proj_states

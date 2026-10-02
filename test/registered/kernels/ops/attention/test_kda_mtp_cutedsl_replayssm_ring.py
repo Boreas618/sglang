@@ -165,9 +165,13 @@ def test_cutedsl_ring_fold_parity(N, H, num_spec):
         assert rel < 2e-2, f"req={j}: rel={rel:.3e}"
 
 
-@pytest.mark.parametrize("N", [4, 32], ids=["small-grid", "large-grid"])
-def test_cutedsl_fused_output_norm(N):
-    H, num_spec, seed = 2, 2, 7
+@pytest.mark.parametrize(
+    "N,H,num_spec",
+    [(4, 2, 2), (32, 2, 2), (1, 6, 7)],
+    ids=["small-grid", "large-grid", "k3-tp16"],
+)
+def test_cutedsl_fused_output_norm(N, H, num_spec):
+    seed = 7
     raw, _ = _run("baseline", N=N, H=H, num_spec=num_spec, seed=seed)
     fused, norm = _run("baseline", N=N, H=H, num_spec=num_spec, seed=seed, onorm=True)
 
